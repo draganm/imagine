@@ -1,6 +1,8 @@
 package imagine
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"testing/fstest"
 
@@ -139,4 +141,66 @@ func TestRenderYAMLMissingRef(t *testing.T) {
 	_, err := renderYAML(in, map[string]string{})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "context")
+}
+
+func TestRenderManifestsMirrorsTree(t *testing.T) {
+	src := fstest.MapFS{
+		"app/deploy.yaml": &fstest.MapFile{Mode: 0o644, Data: []byte("image:\n  context: ./api\n")},
+		"app/config.json": &fstest.MapFile{Mode: 0o644, Data: []byte(`{"k":"v"}`)},
+		"README.md":       &fstest.MapFile{Mode: 0o644, Data: []byte("hi")},
+	}
+	refs := map[string]string{`{"context":"./api"}`: "reg/api@sha256:abc"}
+	dst := t.TempDir()
+
+	require.NoError(t, RenderManifests(refs, src, dst))
+
+	deploy, err := os.ReadFile(filepath.Join(dst, "app", "deploy.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(deploy), "reg/api@sha256:abc")
+
+	cfg, err := os.ReadFile(filepath.Join(dst, "app", "config.json"))
+	require.NoError(t, err)
+	require.Equal(t, `{"k":"v"}`, string(cfg)) // copied verbatim
+
+	readme, err := os.ReadFile(filepath.Join(dst, "README.md"))
+	require.NoError(t, err)
+	require.Equal(t, "hi", string(readme))
+}
+
+func TestRenderManifestsMissingRefWritesNothing(t *testing.T) {
+	src := fstest.MapFS{
+		"deploy.yaml": &fstest.MapFile{Mode: 0o644, Data: []byte("image:\n  context: ./api\n")},
+	}
+	dst := t.TempDir()
+
+	err := RenderManifests(map[string]string{}, src, dst)
+	require.Error(t, err)
+
+	entries, rerr := os.ReadDir(dst)
+	require.NoError(t, rerr)
+	require.Empty(t, entries) // nothing written
+}
+
+func TestRenderManifestsReproducesEmptyDir(t *testing.T) {
+	srcDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "empty"), 0o755))
+	dst := t.TempDir()
+
+	require.NoError(t, RenderManifests(map[string]string{}, os.DirFS(srcDir), dst))
+
+	info, err := os.Stat(filepath.Join(dst, "empty"))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+}
+
+func TestRenderManifestsPreservesFileMode(t *testing.T) {
+	srcDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "run.sh"), []byte("#!/bin/sh\n"), 0o755))
+	dst := t.TempDir()
+
+	require.NoError(t, RenderManifests(map[string]string{}, os.DirFS(srcDir), dst))
+
+	info, err := os.Stat(filepath.Join(dst, "run.sh"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 }

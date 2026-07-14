@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -194,4 +196,65 @@ func renderYAML(data []byte, refs map[string]string) ([]byte, error) {
 		}
 	}
 	return encodeDocuments(docs)
+}
+
+// RenderManifests walks src and reproduces its structure under dstDir. YAML
+// files have every object-style image: field replaced with refs[template.Key];
+// all other files are copied verbatim; directories (including empty ones) are
+// recreated. All discovered templates are validated against refs before any
+// output is written, so a missing reference never leaves a partial tree.
+func RenderManifests(refs map[string]string, src fs.FS, dstDir string) error {
+	// Pass 1: validate every discovered template has a reference.
+	tmpls, err := GetImageTemplates(src)
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for _, t := range tmpls {
+		if _, ok := refs[t.Key]; !ok {
+			missing = append(missing, t.Key)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing image references for templates: %s", strings.Join(missing, ", "))
+	}
+
+	// Pass 2: mirror the source tree into dstDir.
+	return fs.WalkDir(src, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dstDir, filepath.FromSlash(p))
+		if d.IsDir() {
+			if err := os.MkdirAll(dst, 0o755); err != nil {
+				return fmt.Errorf("could not create directory %s: %w", dst, err)
+			}
+			return nil
+		}
+		data, err := fs.ReadFile(src, p)
+		if err != nil {
+			return fmt.Errorf("could not read %s: %w", p, err)
+		}
+		if isYAML(p) {
+			data, err = renderYAML(data, refs)
+			if err != nil {
+				return fmt.Errorf("%s: %w", p, err)
+			}
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		perm := info.Mode().Perm()
+		if perm == 0 {
+			perm = 0o644
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("could not create directory for %s: %w", dst, err)
+		}
+		if err := os.WriteFile(dst, data, perm); err != nil {
+			return fmt.Errorf("could not write %s: %w", dst, err)
+		}
+		return nil
+	})
 }
