@@ -155,3 +155,43 @@ func templatesFromYAML(data []byte) ([]ImageTemplate, error) {
 	}
 	return out, nil
 }
+
+func encodeDocuments(docs []*yaml.Node) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	for _, doc := range docs {
+		if err := enc.Encode(doc); err != nil {
+			return nil, fmt.Errorf("could not encode YAML: %w", err)
+		}
+	}
+	if err := enc.Close(); err != nil {
+		return nil, fmt.Errorf("could not finalize YAML: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func renderYAML(data []byte, refs map[string]string) ([]byte, error) {
+	docs, err := parseDocuments(data)
+	if err != nil {
+		return nil, err
+	}
+	for _, doc := range docs {
+		err := walkImageObjects(doc, func(v *yaml.Node) error {
+			key, _, err := canonicalize(v)
+			if err != nil {
+				return err
+			}
+			ref, ok := refs[key]
+			if !ok {
+				return fmt.Errorf("no image reference provided for image template %s", key)
+			}
+			*v = yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: ref}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return encodeDocuments(docs)
+}
