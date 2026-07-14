@@ -204,3 +204,35 @@ func TestRenderManifestsPreservesFileMode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
 }
+
+func TestEndToEndTwoPhaseFlow(t *testing.T) {
+	src := fstest.MapFS{
+		"deploy.yaml": &fstest.MapFile{Mode: 0o644, Data: []byte(`spec:
+  containers:
+    - name: api
+      image:
+        context: ./api
+        dockerfile: Dockerfile
+`)},
+	}
+
+	// Phase 1: discover templates.
+	tmpls, err := GetImageTemplates(src)
+	require.NoError(t, err)
+	require.Len(t, tmpls, 1)
+
+	// Simulate the build system producing an OCI reference per template.
+	refs := map[string]string{}
+	for _, tm := range tmpls {
+		refs[tm.Key] = "registry.example.com/api@sha256:deadbeef"
+	}
+
+	// Phase 2: render, proving the keys agree across both functions.
+	dst := t.TempDir()
+	require.NoError(t, RenderManifests(refs, src, dst))
+
+	out, err := os.ReadFile(filepath.Join(dst, "deploy.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(out), "registry.example.com/api@sha256:deadbeef")
+	require.NotContains(t, string(out), "dockerfile")
+}
